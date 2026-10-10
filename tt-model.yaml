@@ -1,0 +1,108 @@
+schema: "5.1"
+repo: sunandbean/acestep-1.5-turbo-p100a
+name: acestep-1.5-turbo-p100a
+# ACE-Step's Hub repo IS the layout its own `checkpoints/` directory has, so one snapshot carries
+# the DiT, the Oobleck audio VAE and the Qwen3 text embedder beside each other -- which is what
+# `initialize_service(project_root=..., config_path=...)` expects to find.
+weights:
+  repo: ACE-Step/Ace-Step1.5
+  revision: 19671f406d603126926c1b7e2adc169acbcade22
+  # The planning LM is 3.4 GB and this server never reaches it: text2music runs with
+  # thinking=False and discards the LM hints, so pulling it would be a download nobody uses.
+  ignore_patterns:
+    - "acestep-5Hz-lm-1.7B/*"
+kind: tt-dit-server
+arch: blackhole
+
+image:
+  registry: hf
+
+source:
+  tt_metal: {repo: https://github.com/tenstorrent/tt-metal, ref: v0.80.0-dev20260921}
+  code:
+    # Every port in this family reaches tt-metal for `models.tt_dit.utils.matmul.get_matmul_config`.
+    # The module guards that import and falls back to None, so an under-listed allowlist builds and
+    # loads cleanly and only fails on the first matmul -- list it rather than discover that at serve.
+    - models/common
+    - models/tt_dit
+  extra_code:
+    - root: {repo: https://github.com/SunandBean/tt-acestep, ref: v0.1.3}
+      paths: [tt_acestep]
+    # ACE-Step itself (MIT). It is the model: this port only moves its DiT decoder and its audio
+    # VAE decoder onto the card, and every other stage is upstream's own code running unchanged.
+    # Shipped as source rather than pip-installed because its pyproject pins torch 2.10.0+cu128,
+    # a CUDA build that cannot be installed beside ttnn. The pin is a convenience, not an API
+    # requirement -- `acestep` imports and runs against the CPU torch this image resolves
+    # (torch 2.12.1+cpu with numpy 2.5.3; see requirements.lock).
+    - root: {repo: https://github.com/ACE-Step/ACE-Step-1.5, ref: ca1e85fe9430179831e6bc6be790c332190a3866}
+      paths: [acestep]
+  ubuntu: "22.04"
+  python: "3.12"
+
+runtime:
+  app: tt_acestep.server:app
+  mesh_shape_env: ACESTEP_MESH_SHAPE
+  packages:
+    # ACE-Step's own dependencies, minus the CUDA torch stack it pins and minus the Gradio UI
+    # and training extras this server never reaches.
+    - torchaudio==2.11.0+cpu
+    - "transformers>=4.51.0,<4.58.0"
+    - diffusers
+    - accelerate
+    - einops
+    - einx
+    # the DiT checkpoint ships its own modeling file (trust_remote_code), and that file
+    # imports these two; transformers refuses to load it when either is missing
+    - vector_quantize_pytorch
+    - loguru
+    - loguru
+    - scipy
+    - soundfile
+    - diskcache
+    - matplotlib
+    - peft
+    - lightning
+    - torchmetrics
+    - pytorch-wavelets
+    - pywavelets
+    - typer-slim
+    - modelscope
+    - "setuptools<72"
+    - safetensors
+    - huggingface_hub
+    - numpy
+
+serve:
+  port: 8000
+  hardware: p100a
+  mesh_device: P100
+  env:
+    ARCH_NAME: blackhole
+    # A song's DiT steps are sub-second; the long pole is the VAE decoder's conv kernels,
+    # compiled once per window at startup.
+    TT_METAL_OPERATION_TIMEOUT_SECONDS: "600.0"
+
+verify:
+  - "import tt_acestep.server as s; assert s.app"
+  - "import acestep.handler, acestep.inference, acestep.llm_inference"
+  - "from tt_acestep.local import LocalWorker; assert LocalWorker"
+  # the DiT checkpoint is loaded with trust_remote_code, so transformers checks the imports of a
+  # file that is not in this image. There is no way to verify that list from here -- these two are
+  # what it needed as of the pinned revision.
+  - "import vector_quantize_pytorch, loguru, einx"
+
+card:
+  description: >
+    ACE-Step 1.5 Turbo text-to-music, ported to one Tenstorrent Blackhole p100a. The DiT decoder
+    and the Oobleck audio VAE decoder run on the card; ACE-Step's own pipeline runs unchanged on
+    the CPU in the same process. Weights are MIT from ACE-Step/Ace-Step1.5 and are never
+    redistributed here.
+  quickstart: |
+    ### Request shape
+
+    `POST /predict` takes `{"prompt": str, "lyrics": str, "instrumental": bool,
+    "duration": float, "seed": int}` and returns a base64 WAV with `timing_s`.
+
+    `prompt` is the style caption. Vocals need `lyrics`; set `instrumental: true` for music
+    without them. `duration` is 30-480 seconds. The turbo schedule fixes the step count at
+    **8**; any other `inference_steps` is a 422.
