@@ -26,7 +26,7 @@ source:
     - models/common
     - models/tt_dit
   extra_code:
-    - root: {repo: https://github.com/SunandBean/tt-acestep, ref: v0.1.3}
+    - root: {repo: https://github.com/SunandBean/tt-acestep, ref: v0.1.4}
       paths: [tt_acestep]
     # ACE-Step itself (MIT). It is the model: this port only moves its DiT decoder and its audio
     # VAE decoder onto the card, and every other stage is upstream's own code running unchanged.
